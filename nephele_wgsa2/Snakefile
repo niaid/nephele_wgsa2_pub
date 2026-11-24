@@ -1,0 +1,1712 @@
+# Design, development & documentation
+# Angelina Angelova PhD, Metagenomics Analysis Specialist, Science Support Section, BCBB/OCICB/OSMO/OD/NIAID/NIH
+# Katie McCauley MPH, Metagenomics Specialist, Science Support Section, BCBB/OCICB/OSMO/OD/NIAID/NIH
+# Duc Doan, Software Engineer, Bioinformatics Software Section, BCBB/OCICB/OSMO/OD/NIAID/NIH
+from snakemake.utils import format
+
+configfile: "/pipeline/config.yaml"
+include: "/pipeline/utils.smk"
+
+log_path = snakemake.logger.logfile
+outputs_dir = Path(config["output_dir"])
+
+TMP_DIR=config["tmp_dir"] + "/"
+TMP_SAMPLE_DIR = TMP_DIR + "{sample}"
+TED_READS = config["output_dir"] + ("/TEDreads_mtx/" if config["denovo_mtx"] else "/TEDreads_mgx/")
+TAX_PROFILES = config["output_dir"] + "/TAXprofiles/"
+DBNAME = config["classification_db_name"]
+TED_READS_TAX = TAX_PROFILES + "readsTAX_" + DBNAME +"/"
+TED_READS_FQS_NAME = "TEDreads_fqs/"
+TED_READS_FQS = config["output_dir"] + "/" + TED_READS_FQS_NAME
+ASMB_MGX = config["output_dir"] + "/asmbMGX/"
+ASMB_MTX = config["output_dir"] + "/asmbMTX/"
+ASMB_OUT_SAMPLE_DIR = (ASMB_MTX if config["denovo_mtx"] else ASMB_MGX) + "{sample}_asmb/"
+ASMB_OUT_SAMPLE_FILE = ASMB_OUT_SAMPLE_DIR + "{sample}"
+ASMB_TMP_FINASM_FILE = ASMB_OUT_SAMPLE_DIR + "_tmp_finAsmb.txt" ## final tmp assembly file used across rules
+FUNC_DIR = ASMB_OUT_SAMPLE_DIR + "functional/"
+TAXN_DIR = ASMB_OUT_SAMPLE_DIR + "taxonomic/"
+RGI_DIR = FUNC_DIR + "RGI/"
+GENES = FUNC_DIR + "genes/"
+PREGENES_PREFIX = GENES + "{sample}_PREDgenes"
+PREGENESTAX = TAXN_DIR + "genesTAX_" + DBNAME + "/"
+GENETAX_PREFIX = PREGENESTAX + "{sample}_geneTAX"
+GENETAX = TAX_PROFILES + "geneTAX_" + DBNAME + "/"
+ANNOTATS = FUNC_DIR + "annotations/"
+
+SCAFTAX_DIR = TAXN_DIR + "scafTAX_" + DBNAME + "/"
+SCAFTAX_PREFIX = SCAFTAX_DIR  + "{sample}_scaffTAX"
+SCAFTAX=TAX_PROFILES + "scafTAX_" + DBNAME + "/"
+MAG = TAXN_DIR + "MAGs/"
+MAG_QA = MAG + "magsQA/"
+QC_PLOTS = MAG_QA + "QCplots/"
+TAXBIN = TAX_PROFILES + "magsTAX_checkM/"
+
+PWY_PROFILES = config["output_dir"] + "/PWYprofiles/"
+
+if config["annotations_type"] == "ko":
+    PWYLABEL="ko2gg"
+    ANNO_TYPE="ko"
+    PWYDIR = PWY_PROFILES + "keggPWYs.MP/"
+else:
+    PWYLABEL="ec2mc"
+    ANNO_TYPE="ec"
+    PWYDIR = PWY_PROFILES + "mtccPWYs.MP/"
+PATHWAYS = FUNC_DIR + "pathways/"
+PATHWAYS_PREFIX = PATHWAYS + PWYLABEL
+GENEBIN = PWYDIR + "genebin/"
+PWYBIN  = PWYDIR + "pwybin/"
+PWYPLOTS = PWYDIR + "PWYplots_"+ PWYLABEL + ".html"
+TAXPLOTS = TED_READS_TAX + "TAXplots_readsTAX_" + DBNAME +".html"
+
+PWY_MERGED_TABLES = PWYDIR + "merged_tables/"
+TAX_MERGED_TABLES = TED_READS_TAX + "merged_tables/"
+PWY_DIVERSITY_PLOTS = PWYDIR + "DivPlots/"
+TAX_DIVERSITY_PLOTS = TED_READS_TAX + "DivPlots/"
+BIOM_FILE_MICROBIOMEDB = config["output_dir"] + "/" + config["biom_file_name"]
+BIOM_FILE_6C=TAXBIN + "MAG-based_Counts+TAX.biom"
+PWYBIOM = PWYDIR + "bioms/"
+TAXBIOM = TED_READS_TAX + "bioms/"
+
+# samples = read_mapping_file()
+samples = config["samples"]
+threads_per_job = get_num_threads_per_job(len(samples))
+
+pipeline_output = [
+    TAXPLOTS,     PWYPLOTS,
+    # expand(ASMB_OUT_SAMPLE_FILE + "_asmbDepths.txt" , sample=samples),
+    # expand(ASMB_OUT_SAMPLE_FILE + "_asmbCovr.txt"   , sample=samples),
+    # expand(PREGENES_PREFIX      + "_stats.txt"      , sample=samples),
+    expand(PWYBIOM  + "{sample}_json.biom", sample=samples),
+    expand(TAXBIOM  + "{sample}_json.biom", sample=samples),
+    # expand(ANNOTATS + "{sample}_annots.ko.faa", sample=samples),
+    # expand(ANNOTATS + "{sample}_annots.ec.fna", sample=samples),
+    # expand(ANNOTATS + "{sample}_geneTPMtab.ec.txt", sample=samples),
+    # expand(ANNOTATS + "{sample}_geneTPMtab.ko.txt", sample=samples),
+]
+
+
+## Output for main pipeline options
+if config["denovo_mtx"]:
+    pipeline_output.extend([
+        expand(TED_READS_FQS + "{sample}_R1_tedr.fastq.gz", sample=samples)
+        ])
+
+# Merging binned files from all samples into 1 collated table only run when users provide at least 2 samples
+if len(samples) > 1:
+    pipeline_output.extend([
+        PWY_MERGED_TABLES + "merged_Counts+allTiers_json.biom",
+        TAX_MERGED_TABLES + "merged_Counts+Lineage_json.biom",
+        PWY_DIVERSITY_PLOTS + "PWY_diversity_plotsR.log.txt",
+        TAX_DIVERSITY_PLOTS + "TAX_diversity_plotsR.log.txt"
+    ])
+
+# Output for step 6D (AMRFinder; optional)
+if config["find_args"]:
+    pipeline_output.extend([
+        expand(RGI_DIR + "{sample}_RGI_main.txt", sample=samples),
+        PWY_MERGED_TABLES + "merged_argsTPMtable.txt"
+    ])
+
+# Output for step 6A (optional)
+if config["tax_genes"]:
+    pipeline_output.extend([
+        expand(GENETAX_PREFIX + "_ABUNtab_wTAX.txt", sample=samples),
+        GENETAX + "TAXplots_genesTAX_" + DBNAME + ".html"
+    ])
+    # if DBNAME != "mgbcDB":
+    #     pipeline_output.extend([
+    #         GENETAX + "TAXplots_genesTAX_" + DBNAME + ".html"
+    #     ])
+
+# Output for step 6B (optional) 
+if config["tax_scaffolds"]:
+    pipeline_output.extend([
+        expand(SCAFTAX_PREFIX + "_asmbCovr_wTAX.txt", sample=samples),
+        SCAFTAX + "TAXplots_scaffTAX_" + DBNAME + ".html" ## approximate bundnaces
+    ])
+
+# Output for step 6C (optional)
+if config["mag"]:
+    pipeline_output.extend([
+        expand(MAG_QA + "mag_SUMMARY.txt", sample=samples),
+        expand(QC_PLOTS + "_checkm_plots.done", sample=samples),
+        TAXBIN + "TAXplots_MAGs.html",
+        BIOM_FILE_6C
+    ])
+
+rule all:
+    input:
+        pipeline_output,
+
+
+onstart:
+    shell(
+    """
+    set +o pipefail
+    echo "Dependencies:"
+    conda list fastp -n fastp | tail -n1 | awk '{{print $1,$2}}'
+    metaspades.py --version
+    bbmap.sh --version 2>&1 >/dev/null | grep 'BBTools version'
+    bowtie2 --version | awk '{{print "bowtie2 version", $3}}' | head -n1
+    samtools --version | head -n1
+    metabat2 2>&1 >/dev/null | grep version
+    prodigal -v 2>&1 >/dev/null | head -n2 | tail -n1
+    conda list checkm -n checkm | tail -n1 | awk '{{print $1,$2}}'
+    ktImportText | head -n2 | tail -n1 | sed 's/[^a-zA-Z0-9. ]//g' | sed 's/^ *//g'
+    metaprokka --version
+    cat {config[minpath_script]} | grep version | head -n1
+    verse -v | head -n2 | tail -n1
+    kraken2 --version | head -n1
+    conda list rgi -n rgi | tail -n1 | awk '{{print $1, $2}}'
+    # rgi -h |grep "Resistance Gene Identifier - " | sed 's/ - / version /g'
+    emapper.py --version | tail -n1 | awk '{{print $1}}'
+    R --version | head -n1
+    ribodetector_cpu --version | awk '{{print "ribodetector version", $2}}'
+    Trinity --version | head -n1
+    snakemake --version | awk '{{print "Snakemake version", $1}}'
+    """)
+
+
+
+#### ------------ starting main pipeline -----------------
+
+
+# Step 2 starts
+rule run_fastp:
+    threads: 16
+    input:
+        unpack(get_fastq_gz)
+    params:
+        f=TMP_DIR + "{sample}_R1_te.fastq.gz",
+        r=TMP_DIR + "{sample}_R2_te.fastq.gz",
+        tmpdir=TMP_DIR,
+        json=TMP_DIR   + "{sample}_fastp.json",
+    output:
+        text=TED_READS + "{sample}_fastplog.txt",
+        html=TED_READS + "{sample}_fastplog.html",
+    conda:
+        "fastp"
+    script:
+        "scripts/run_fastp.py"
+
+rule run_kraken2_decontaminate:
+    resources:
+        mem_gb=config["total_mem_gb"]
+    input:
+        h=ancient(rules.run_fastp.output.text),
+    threads: threads_per_job
+    params:
+        f=rules.run_fastp.params.f,
+        r=rules.run_fastp.params.r,
+        decontaminate=config["decontaminate"],
+        kr2confd_host=config["kr2confidence_host"],
+        out=TMP_DIR + "{sample}_R#_ted.fastq",
+        fte=TMP_DIR + "{sample}_R_1_ted.fastq",
+        rte=TMP_DIR + "{sample}_R_2_ted.fastq",
+        tedtar=config["output_dir"] + "/TEDfastq.tar",
+        outdir=config["output_dir"],
+        fqsdir=TED_READS_FQS_NAME
+    output:
+        report=TED_READS     + "{sample}_kr2_contamREPORT.txt",
+        outlog=TED_READS     + "{sample}_kr2_contamLOG.txt",
+        fwdted=TED_READS_FQS + "{sample}_R1_ted.fastq.gz",
+        revted=TED_READS_FQS + "{sample}_R2_ted.fastq.gz",
+    run:
+        try:
+            shell_command = """
+        ### touch {input.h}
+
+        if [[ ! -s {output.revted} ]] && [[ -s {params.tedtar} ]] ; then 
+            tar -xvf {params.tedtar} -C {params.outdir}/  &&
+            touch {output.fwdted} {output.revted}
+        else 
+            kraken2 --use-names --gzip-compressed --threads {threads} \
+            --confidence {params.kr2confd_host} --db {params.decontaminate} \
+            --paired {params.f} {params.r} --unclassified-out {params.out} \
+            --output -  --report {output.report} 2>> {output.outlog}
+            
+            pigz -c {params.fte} -p {threads} > {output.fwdted} && \
+            pigz -c {params.rte} -p {threads} > {output.revted} 
+        fi
+        """
+            main_logger.info(f"Shell command for rule run_kraken2_decontaminate:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule run_kraken2_decontaminate: {e}\ninputs: {input}")
+            raise(e)
+
+# Step 3 starts
+rule run_kraken2_classification:
+    resources:
+        mem_gb=config["total_mem_gb"]
+    input:
+        f=lambda wildcards: ancient(rules.remove_rRNA.output.fread_gz) if config["denovo_mtx"] else 
+                            ancient(rules.run_kraken2_decontaminate.output.fwdted),
+        r=lambda wildcards: ancient(rules.remove_rRNA.output.rread_gz) if config["denovo_mtx"] else 
+                            ancient(rules.run_kraken2_decontaminate.output.revted),
+    threads: threads_per_job
+    params:
+        classification_db=config["classification_db"],
+        kr2confd_taxon=config["kr2confidence_taxonomic"],
+    output:
+        report=TED_READS_TAX + "reports/{sample}_taxREPORT.txt",
+        outlog=TED_READS_TAX + "taxlogs/{sample}_classLOG.txt",
+    run:
+        try:
+            shell_command = """kraken2 --use-names --gzip-compressed --threads {threads} \
+        --confidence {params.kr2confd_taxon} --db {params.classification_db} --memory-mapping \
+        --paired {input.f} {input.r}  --output - --report {output.report} 2>> {output.outlog}"""
+            main_logger.info(f"Shell command for rule run_kraken2_classification:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule run_kraken2_classification: {e}\ninputs: {input}")
+            raise(e)
+
+
+rule tax_kreport2krona_per_sample:
+    input:
+        krfile=ancient(rules.run_kraken2_classification.output.report)
+    params:
+        kreport2krona_script=config["kreport2krona_script"],
+        sedRNK='s_\\tR[12]\\t(.*)(Viruses|Bacteria|Eukaryota|Archaea)_\\tD\\t\\1\\2_g',
+        sedSTR='s/\\tUnclassified\\t\\t\\t\\t\\t\\t\\t0/\\tUnclassified\\tUnclassified\\tUnclassified\\tUnclassified\\tUnclassified\\tUnclassified\\tUnclassified\\t0/g' # more explicit
+    output:
+        tmpfile=temp(TED_READS_TAX + "reports/_tmp_{sample}.txt"),
+        binfile=TED_READS_TAX + "taxbin/{sample}_wTAXid_4krona.txt"
+    run:
+        try:
+            shell_command = """sed -E '{params.sedRNK}' {input.krfile} > {output.tmpfile} && \
+        python3 {params.kreport2krona_script} --report-file {output.tmpfile} --no-tax-prefixes -o {output.binfile} && \
+        sed -i '{params.sedSTR}'  {output.binfile}"""
+ ##--> the first SED "fixes" the domain taxonomic rankings in the taxREPORT from the new R1/R2 root designation to the old D designation (consistent)
+ ##--> kreport2krona_script is edited to disable table merging, since it overprints the bin/files (required output)
+ ##--> removed the mod_kreport2krona_output rule cuz mods are above and no output 
+ ##--> last SED old: 's/\\tUnclassified\\t\\t\\t\\t\\t\\t\\t0/\\tUnclassified\\tUnclassified\\tUnclassified\\tUnclassified\\tUnclassified\\tUnclassified\\tUnclassified\\t0/g'
+ ##--> last SED loop: ':a; 2s/\\t\\t/\\tUnclassified\\t/; ta', ## loops over empty TSV fields on line 2 (expected Unclassified taxid 0), 
+ ##--> --> but if line 2 is bacteria\t\t\... it also captures that and acauses error. Leaving to more explicit version
+ ##--> last SED "fixes" the Unclassified row to contain string in all lineage columns <--##
+            main_logger.info(f"Shell command for rule tax_kreport2krona_per_sample:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule tax_kreport2krona_per_sample: {e}\ninputs: {input}")
+            raise(e)
+
+
+rule tax_ktImportText:
+    input:
+        ancient(expand(rules.tax_kreport2krona_per_sample.output.binfile, sample=samples))
+    output:
+        TAXPLOTS
+    run:
+        try:
+            shell_command = "ktImportText {input} -o {output}"
+            main_logger.info(f"Shell command for rule tax_ktImportText:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule tax_ktImportText: {e}\ninputs: {input}")
+            raise(e)
+
+
+
+
+# Step 4 starts
+rule remove_rRNA:
+    input:
+        log=rules.run_kraken2_decontaminate.output.outlog,
+        fwdgz=ancient(rules.run_kraken2_decontaminate.output.fwdted),
+        revgz=ancient(rules.run_kraken2_decontaminate.output.revted),
+    params:
+        f=ancient(rules.run_kraken2_decontaminate.params.fte),
+        r=ancient(rules.run_kraken2_decontaminate.params.rte),
+        ali_log = TED_READS  + "{sample}_rna_filter_LOG.txt",
+    output:
+        fread_gz=TED_READS_FQS + "{sample}_R1_tedr.fastq.gz",
+        rread_gz=TED_READS_FQS + "{sample}_R2_tedr.fastq.gz",
+    threads: threads_per_job
+    run:
+        try:
+            shell_command = """
+        if [[ -s {params.f} ]]; then 
+            ribodetector_cpu -t {threads} -l 100 --chunk_size 3200 -e norrna \
+                -i {params.f} {params.r}  --log {params.ali_log} \
+                -o {output.fread_gz} {output.rread_gz} 
+        else 
+            ribodetector_cpu -t {threads} -l 100 --chunk_size 3200 -e norrna \
+                -i {input.fwdgz} {input.revgz}  --log {params.ali_log} \
+                -o {output.fread_gz} {output.rread_gz} 
+        fi
+
+
+        sed -i 's/\\\x1b\[[0-9;]*m//g' {params.ali_log}
+
+        line_count=$(pigz -dc -p {threads} {output.fread_gz} | wc -l )
+        if [ "$line_count" -lt 400 ]; then
+            echo "---- FAIL: Fewer than 100 reads remain after rRNA filtering for {wildcards.sample}. Reads are unlikely to assemble. 
+            If this dataset is rRNA amplicon reads, consider using our DADA2 or QIIME pipelines."
+            exit
+        fi
+        """
+            main_logger.info(f"Shell command for rule remove_rRNA:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule remove_rRNA: {e}\ninputs: {input}")
+            raise(e)
+
+if config["read_norm"]:
+    rule norm_readDepth:
+        resources:
+            mem_gb = lambda wildcards: int(config['total_mem_gb'] // 4)
+        input:
+            Freads = lambda wildcards: rules.remove_rRNA.output.fread_gz if config["denovo_mtx"] else rules.run_kraken2_decontaminate.output.fwdted,
+            Rreads = lambda wildcards: rules.remove_rRNA.output.rread_gz if config["denovo_mtx"] else rules.run_kraken2_decontaminate.output.revted,
+        params:
+            maxCov=config["readCoverage"],
+            logfile=TED_READS + "{sample}_normLog.txt",
+            mem_gb = "-Xmx" + str(int(config['total_mem_gb'] // 4)) + "g"
+        output:
+            normFread = (TED_READS_FQS + "{sample}_ted_norm_R1.fastq.gz"),
+            normRread = (TED_READS_FQS + "{sample}_ted_norm_R2.fastq.gz"),
+        threads: threads_per_job
+        run:
+            try:
+                shell_command = """
+            bbnorm.sh {params.mem_gb} target={params.maxCov}  in={input.Freads} in2={input.Rreads} ecc=f prefilter=f \
+                             out={output.normFread} out2={output.normRread}  threads={threads} &> {params.logfile}
+            """
+                main_logger.info(f"Shell command for rule norm_readDepth:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule norm_readDepth: {e}\ninputs: {input}")
+                raise(e)
+
+
+rule run_metaspades:
+    input:
+        in1=lambda wildcards: (rules.norm_readDepth.output.normFread if config["read_norm"] else rules.run_kraken2_decontaminate.output.fwdted),
+        in2=lambda wildcards: (rules.norm_readDepth.output.normRread if config["read_norm"] else rules.run_kraken2_decontaminate.output.revted),
+        req=lambda wildcards: (rules.TAX_diversity_plots.output.logR if len(samples) >1     else []),   
+    resources:
+        mem_gb=int(config['total_mem_gb'])
+    params:
+        mem_gb=int(config['total_mem_gb']),
+        out=ASMB_OUT_SAMPLE_DIR,
+        ## temp asmb files
+        tmp_dir=temp(TMP_SAMPLE_DIR + "_asmb/"),
+        scafout=temp(TMP_SAMPLE_DIR + "_asmb/" + "scaffolds.fasta"),
+        contout=temp(TMP_SAMPLE_DIR + "_asmb/" + "contigs.fasta"),
+        grafout=temp(TMP_SAMPLE_DIR + "_asmb/" + "assembly_graph_with_scaffolds.gfa"),
+        mspalog=temp(TMP_SAMPLE_DIR + "_asmb/" + "spades.log"),
+        ## marker files
+        passout=ASMB_OUT_SAMPLE_DIR + "_asmb.pass",
+        failout=ASMB_OUT_SAMPLE_DIR + "_asmb.fail",
+        ## final files
+        grfout= ASMB_OUT_SAMPLE_FILE + "_asmbFinal.gfa",
+        scfout= ASMB_OUT_SAMPLE_FILE + "_scaffolds.fasta",
+        cntout= ASMB_OUT_SAMPLE_FILE + "_contigs.fasta",
+        logout= ASMB_OUT_SAMPLE_FILE + "_spadesLOG.txt",
+        asmbout=ASMB_TMP_FINASM_FILE,  ##"_tmp_finAsmb.txt" needed for run_bbtools_stats proper unpackaging
+    threads: config["num_cpus"] ##threads_per_job
+    output:
+        doneout=     ASMB_OUT_SAMPLE_DIR + "_MGXasmb.done",
+    run:
+        try:
+            shell_command = """
+        time metaspades.py -1 {input.in1} -2 {input.in2}  --memory {params.mem_gb} \
+            --tmp-dir {params.tmp_dir} -o {params.tmp_dir} -t {threads} \
+            --only-assembler  > {params.logout} 2>&1 && \
+        touch {output.doneout} 
+        
+        if [[ -s {params.scafout} ]]; then  
+                    cp {params.grafout} {params.grfout} && \
+                    cp {params.contout} {params.cntout} && \
+                    cp {params.scafout} {params.scfout} && \
+                    cp {params.scafout} {params.asmbout} && \
+                    touch {params.passout}  
+                    echo "---- PASS: scaffold assembly achieved for {wildcards.sample}"
+        elif [[ -s {params.contout} ]]; then
+                    cp {params.contout} {params.cntout} && \
+                    cp {params.contout} {params.asmbout} && \
+                    touch {params.passout} && \
+                    echo "---- PASS: contig assembly achieved for {wildcards.sample}"
+        else 
+                    echo ">no_assembly produced" > {params.asmbout} && \
+                    touch {params.failout}     && \
+                    echo "---- ERROR in rule run_metaspades::" && \
+                    echo "---- FAIL: assembly failed for {wildcards.sample}" && \
+                    echo "---- processing will continue for other samples as much as possible"   
+        fi
+        echo "---- printing tail end of assembly log"
+        tail -n 30 {params.logout}
+        echo "======= SPAdes pipeline finished. ---- ----- -----"
+        """
+            main_logger.info(f"Shell command for rule run_metaspades:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule run_metaspades: {e}\ninputs: {input}")
+            raise(e)
+
+rule run_trinity:
+    resources:
+        mem_gb=lambda wildcards: int(config['total_mem_gb'] // 3)
+    input:
+        f=lambda wildcards: (rules.norm_readDepth.output.normFread if config["read_norm"] else rules.remove_rRNA.output.fread_gz),
+        r=lambda wildcards: (rules.norm_readDepth.output.normRread if config["read_norm"] else rules.remove_rRNA.output.rread_gz),
+        q=lambda wildcards: (rules.TAX_diversity_plots.output.logR if len(samples) >1     else []),         
+    threads: config["num_cpus"]
+    params:
+        tmpDir=TMP_SAMPLE_DIR + "_trinity_asmb/",
+        fasout=TMP_DIR + "{sample}_trinity_asmb.Trinity.fasta",
+        memrGb=str(config['total_mem_gb'] // 3) + "G",
+        threads = lambda wildcards: int(config["num_cpus"] - 8),
+        bfly_CPU=2,
+        bfly_HeapSpace="20G",
+        ## marker files
+        passout=ASMB_OUT_SAMPLE_DIR + "_asmb.pass",
+        failout=ASMB_OUT_SAMPLE_DIR + "_asmb.fail",
+        ## final files
+        cntout= ASMB_OUT_SAMPLE_FILE + "_contigs.fasta",
+        logout= ASMB_OUT_SAMPLE_FILE + "_trinityLOG.txt",
+        asmbout=ASMB_TMP_FINASM_FILE,  ## "_tmp_finAsmb.txt" needed for run_bbtools_stats proper unpackaging
+    output:
+        doneout=     ASMB_OUT_SAMPLE_DIR + "_MTXasmb.done",
+    run:
+        try:
+            shell_command = """
+        time Trinity --seqType fq --left {input.f} --right {input.r} --CPU {params.threads} \
+            --output {params.tmpDir} --full_cleanup --max_memory {params.memrGb} \
+            --bflyHeapSpaceMax {params.bfly_HeapSpace} --bflyCPU {params.bfly_CPU} > \
+            {params.logout} 2>&1 && touch {output.doneout}
+
+        if [[ -s {params.fasout} ]]; then 
+                    cp {params.fasout} {params.cntout} && \
+                    cp {params.fasout} {params.asmbout} && \
+                    touch {params.passout} ## needs to be empty
+                    echo "---- PASS: assembly passed for {wildcards.sample}"
+        else 
+                    echo ">no_assembly produced" > {params.asmbout} && \
+                    touch {output.doneout} && touch {params.failout} && \
+                    echo "---- ERROR in rule run_trinity::" && \
+                    echo "---- FAIL: assembly failed for {wildcards.sample}" && \
+                    echo "---- processing will continue for other samples as much as possible" 
+        fi
+        tail -n 30 {params.logout} | grep -v "succeeded"
+        """
+            main_logger.info(f"Shell command for rule run_trinity:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule run_trinity: {e}\ninputs: {input}")
+            raise(e)
+
+rule run_bbtools_stats: ## this rule _needs_ a file to expand
+    input:
+        doneout=lambda wildcards: (rules.run_trinity.output.doneout    if config["denovo_mtx"] 
+                           else rules.run_metaspades.output.doneout),
+    params:
+        asm     =ASMB_OUT_SAMPLE_DIR,
+        passmark=ASMB_OUT_SAMPLE_DIR  + "_asmb.pass",
+        asmbfas1=ASMB_TMP_FINASM_FILE,  # ASMB_OUT_SAMPLE_DIR + "_tmp_finAsmb.txt",
+        ## fake files for PWY_collation rule
+        fake_dir1=GENEBIN, ## touch needs the PATH pre-made
+        fake_dir2=PWYBIN,  ## touch needs the PATH pre-made
+        fake_tpm1=temp(GENEBIN + "{sample}_geneTPMtab." + ANNO_TYPE + ".txt"), 
+        fake_krn2=temp(PWYBIN  + "{sample}_4krona.txt"),
+    output:
+        finfasta=ASMB_OUT_SAMPLE_FILE + "_asmbFinal.fasta",
+        finstats=ASMB_OUT_SAMPLE_FILE + "_asmbStats.txt",
+    run:
+        try:
+            shell_command = """
+        if [[ -e {params.passmark} ]]; then  ## exists
+            sed $'s/_cov_/ cov_/g' {params.asmbfas1} > {output.finfasta} && \
+            stats.sh in={output.finfasta} out={output.finstats} && \
+            printf \"\\nTEDreads mapping stats:\\n\"  >> {output.finstats}
+        else
+            echo "---- FAIL: no assembly produced" >> {output.finstats}
+            mv {params.asmbfas1} {output.finfasta}
+            mkdir -p {params.fake_dir1} && mkdir -p {params.fake_dir2}
+            touch {params.fake_tpm1} {params.fake_krn2}
+        fi
+    """
+            main_logger.info(f"Shell command for rule run_bbtools_stats:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule run_bbtools_stats: {e}\ninputs: {input}")
+            raise(e)
+
+
+
+# Step 5 starts
+rule run_bowtie2:
+    input:
+        oristat=ancient(expand(rules.run_bbtools_stats.output.finstats, sample = samples )),
+        in1=lambda wildcards: rules.remove_rRNA.output.fread_gz if config["denovo_mtx"] else rules.run_kraken2_decontaminate.output.fwdted,
+        in2=lambda wildcards: rules.remove_rRNA.output.rread_gz if config["denovo_mtx"] else rules.run_kraken2_decontaminate.output.revted,
+    params:
+        DBname=TMP_SAMPLE_DIR + "_asmb/" + "{sample}.db", ## so bt2 tmp files dont get overwritten
+        finfasta=rules.run_bbtools_stats.output.finfasta,
+        finstats=rules.run_bbtools_stats.output.finstats, #  its both input and output
+        passmark=ASMB_OUT_SAMPLE_DIR  + "_asmb.pass",
+    threads: threads_per_job
+    output:
+        samfile=temp(TMP_SAMPLE_DIR + "_asmb/" + "_tmp.sam"),
+        bt2done=temp(ASMB_OUT_SAMPLE_DIR + "_bt2run.done"), 
+    run:
+        try:
+            shell_command = """
+        if [[ -e {params.passmark} ]]; then  ## just ensure existance or bt2 errors
+            bowtie2-build --quiet --threads {threads} {params.finfasta} {params.DBname} 
+            bowtie2 --phred33 --sensitive-local --no-unal --seed 4 \
+                -1 {input.in1} -2 {input.in2} -x {params.DBname} \
+                -S {output.samfile} -p {threads} 2>> {params.finstats} && touch {output.bt2done}
+        else true
+        fi
+    """
+            main_logger.info(f"Shell command for rule run_bowtie2:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule run_bowtie2: {e}\ninputs: {input}")
+            raise(e)
+
+ 
+
+rule sam_to_bam:
+    input:
+        samfile=rules.run_bowtie2.output.samfile,
+        bt2fin =rules.run_bowtie2.output.bt2done,
+    params:
+        bam_srtorig=TMP_SAMPLE_DIR + "_asmb/" + "_srtorig.bam",
+        prefix_mdup=TMP_SAMPLE_DIR + "_asmb/" + "_markdup",
+        bam_initial=TMP_SAMPLE_DIR + "_asmb/" + "_initial.bam",
+        bam_colated=TMP_SAMPLE_DIR + "_asmb/" + "_colated.bam",
+        bam_fixmate=TMP_SAMPLE_DIR + "_asmb/" + "_fixmate.bam",
+        bam_srtfixd=TMP_SAMPLE_DIR + "_asmb/" + "_srtfixd.bam",
+        bam_fixsrtd=TMP_SAMPLE_DIR + "_asmb/" + "_fixsrtd.bam",
+        tmp_mrkdp  =TMP_SAMPLE_DIR + "_asmb/" + "_markdup.txt",
+    threads: threads_per_job
+    output:
+        final_bam=ASMB_OUT_SAMPLE_FILE      + "_asmbFinal.bam",
+        bam_index=ASMB_OUT_SAMPLE_FILE      + "_asmbFinal.bam.bai",
+    run:
+        try:
+            shell_command = """samtools sort {input.samfile} -o {params.bam_initial} -@ {threads} -T {params.bam_srtorig} && \
+        samtools collate {params.bam_initial} -o {params.bam_colated} -@ {threads} {params.bam_colated} && \
+        samtools fixmate -m {params.bam_colated} {params.bam_fixmate} -@ {threads} && \
+        samtools sort {params.bam_fixmate} -o {params.bam_fixsrtd} -@ {threads} -T {params.bam_srtfixd} && \
+        samtools markdup -r -s {params.bam_fixsrtd} -f {params.tmp_mrkdp} {output.final_bam} -@ {threads} -T {params.prefix_mdup} && \
+        samtools index -b {output.final_bam} -@ {threads}"""
+            main_logger.info(f"Shell command for rule sam_to_bam:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule sam_to_bam: {e}\ninputs: {input}")
+            raise(e)
+
+rule add_derep_stats:
+    input:
+        in1=ancient(rules.run_bbtools_stats.output.finstats),
+        req=rules.sam_to_bam.output.final_bam,
+    params:
+        in2=rules.sam_to_bam.params.tmp_mrkdp,
+        stats_file=ancient(ASMB_OUT_SAMPLE_FILE + "_asmbStats.txt"),
+        tmp_out   =ASMB_OUT_SAMPLE_FILE + "_tmp_file.txt"
+    output:
+        # to signal this step is completed
+        ASMB_OUT_SAMPLE_DIR + "_added_derep_stats.done"
+    run:
+        try:
+            shell_command = """cat {input.in1} <(printf \"\\nRead alignment de-replication stats:\\n\") {params.in2} > {params.tmp_out} && \
+        mv {params.tmp_out} {params.stats_file} && touch {output}"""
+            main_logger.info(f"Shell command for rule add_derep_stats:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule add_derep_stats: {e}\ninputs: {input}")
+            raise(e)
+
+
+rule scaffold_and_read_counts:
+    resources:
+        mem_gb=lambda wildcards: int(config['total_mem_gb'] // 4)
+    threads: threads_per_job
+    input:
+        final_bam=rules.sam_to_bam.output.final_bam
+    params:
+        mem_gb = "-Xmx" + str(int(config['total_mem_gb'] // 4)) + "g",
+        finstatsADD=ancient(rules.run_bowtie2.params.finstats),
+        tmp_scafcov=TMP_SAMPLE_DIR + "_asmb/" + "_tmp_scafcov.txt",
+        tmp_basecov=TMP_SAMPLE_DIR + "_asmb/" + "_tmp_basecov.txt",
+        tmp_fileidx=TMP_SAMPLE_DIR + "_asmb/" + "_tmp_fileidx",
+        tmp_readcnt=TMP_SAMPLE_DIR + "_asmb/" + "_tmp_readcount.txt",
+        tmp_scfcov1=TMP_SAMPLE_DIR + "_asmb/" + "_tmp_scfcov1.txt",
+    output:
+        out_depths =     ASMB_OUT_SAMPLE_FILE + "_asmbDepths.txt",
+        out_scfCovr=     ASMB_OUT_SAMPLE_FILE + "_asmbCovr.txt",
+    run:
+        try:
+            shell_command = """
+        printf \"\\n\\nRead Coverage stats: \\n\" >> {params.finstatsADD}
+        pileup.sh {params.mem_gb} {input.final_bam} threads={threads} out={params.tmp_scafcov} overwrite=true 2>> {params.finstatsADD} && \
+        sort -o {params.tmp_scafcov} {params.tmp_scafcov} && \
+        jgi_summarize_bam_contig_depths {input.final_bam} --outputDepth {output.out_depths} && \
+        sort {output.out_depths} | sed '1 s/^/#/' | cut -f 1-3 > {params.tmp_basecov} && \
+        samtools idxstats -@ {threads} {input.final_bam} > {params.tmp_fileidx} 
+        
+        cut -f 1-3 {params.tmp_fileidx} | sed -e '1s/^/#contigName\\tLength\\tReadsCount\\n/' | sort | grep -v \"*\" > {params.tmp_readcnt} && \
+        paste {params.tmp_readcnt} {params.tmp_scafcov} {params.tmp_basecov} | cut -f 1,2,3,8-14,17 -d $'\\t' > {params.tmp_scfcov1} 
+        
+        awk 'BEGIN{{FS=OFS=\"\\t\"}} NR>1 {{if ($2>0 && $3>0) $12=sprintf(\"%0.2f\", $3*1e3/$2); else $12=0; print}}'  {params.tmp_scfcov1} | \
+            sed -e '1s/^/#NODE\\tlen\\tReads\\t\%NodeCovered\\t\%bpCovered\\tplusReads\\tminusReads\\t\%GC\\tMedFold\\tstDev\\tAveDepth\\tRPK\\n/' > \
+            {output.out_scfCovr}
+        """
+            main_logger.info(f"Shell command for rule scaffold_and_read_counts:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule scaffold_and_read_counts: {e}\ninputs: {input}")
+            raise(e)
+
+
+# Step 6 starts
+rule gene_prediction:
+    input:
+        finfas=rules.run_bbtools_stats.output.finfasta,
+        require=rules.scaffold_and_read_counts.output.out_scfCovr, 
+    threads: threads_per_job
+    output:
+        gff=PREGENES_PREFIX + ".gff",
+        faa=PREGENES_PREFIX + ".faa",
+        fna=PREGENES_PREFIX + ".fna"
+    run:
+        try:
+            shell_command = "prodigal -p meta -i {input.finfas} -f gff -o {output.gff} -a {output.faa} -d {output.fna} -q"
+            main_logger.info(f"Shell command for rule gene_prediction:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule gene_prediction: {e}\ninputs: {input}")
+            raise(e)
+
+rule gff_to_gtf:
+    input:
+        rules.gene_prediction.output.gff
+    params:
+        gff2gtf_script=config["gff2gtf_script"]
+    output:
+        PREGENES_PREFIX + ".gtf"
+    run:
+        try:
+            shell_command = "{params.gff2gtf_script} {input} > {output}"
+            main_logger.info(f"Shell command for rule gff_to_gtf:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule gff_to_gtf: {e}\ninputs: {input}")
+            raise(e)
+
+rule run_verse:
+    input:
+        gtf=rules.gff_to_gtf.output,
+        final_bam=rules.sam_to_bam.output.final_bam
+    threads: threads_per_job
+    params:
+        basename=GENES + "verse",
+        versesum=GENES + "verse.CDS.summary.txt", ## was output.out1
+        verselog=GENES + "verse_runLOG.txt",
+    output:
+        out2=temp(GENES + "verse.CDS.txt"),
+        out3=PREGENES_PREFIX + "_stats.txt"
+    run:
+        try:
+            shell_command = """
+        verse -a {input.gtf} -t 'CDS' -g gene_id -z 0 -s 0 \
+        -o {params.basename} {input.final_bam} -T 4 > {params.verselog} 2>&1 
+        mv {params.versesum} {output.out3}
+        """
+            main_logger.info(f"Shell command for rule run_verse:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule run_verse: {e}\ninputs: {input}")
+            raise(e)
+
+
+rule tpm_normalization:
+    input:
+        gtf=rules.gff_to_gtf.output,
+        verse_cds=rules.run_verse.output.out2
+    params:
+        tmp_lens=TMP_SAMPLE_DIR + "_asmb/_tmp_gene_lengths.txt",
+        tmp_cnts=TMP_SAMPLE_DIR + "_asmb/_tmp_gene_counts.txt",
+        tmp_cvrg=TMP_SAMPLE_DIR + "_asmb/_tmp_gene_coverage.txt",
+        tmp_rpk =TMP_SAMPLE_DIR + "_asmb/_tmp_gene_RPK.txt",
+    output:
+        ABUNtab =PREGENES_PREFIX + "_ABUNtab.txt"
+    run:
+        try:
+            shell_command = """cut -f4,5,9 {input.gtf} | sed 's/gene_id //g' | gawk '{{print $3,$2-$1+1}}' | tr ' ' '\\t' | sed '1s/^/gene\\tlength\\n/' > {params.tmp_lens} && \
+        join {params.tmp_lens} {input.verse_cds} -t $'\\t' > {params.tmp_cnts} && \
+        grep \"_\" {params.tmp_cnts} | awk -v OFS=\"\\t\" '{{$4 = sprintf(\"%0.0f\", $3*150/$2)}}1' | sort | sed -e '1s/^/#name\\tlen\\treads\\tcov\\n/'       > {params.tmp_cvrg} && \
+        grep \"_\" {params.tmp_cvrg} | awk -v OFS=\"\\t\" '{{$5 = sprintf(\"%0.0f\", $3*1e3/$2)}}1' | sort | sed -e '1s/^/#name\\tlen\\treads\\tcov\\tRPK\\n/' > {params.tmp_rpk}  && \
+        awk -v OFS=\"\\t\" 'NR==FNR{{sum+= $5; next}} FNR==1{{print $0,\"iTPM\"; next}} {{printf(\"%s %0.0f\\n\", $0,$5*1e6/sum)}}'  {params.tmp_rpk} {params.tmp_rpk} |sed -e 's/\\s/\\t/g' > {output.ABUNtab}  """
+            main_logger.info(f"Shell command for rule tpm_normalization:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule tpm_normalization: {e}\ninputs: {input}")
+            raise(e)
+
+
+# Step 7 starts
+rule gene_annotation:
+    resources:
+        mem_gb=config["total_mem_gb"] # make sure not run out of memory
+    input:
+        ancient(rules.gene_prediction.output.faa),
+    threads: config["num_cpus"], ##threads_per_job
+    params:
+        egg_db=config["eggnog_db"],
+        out_dir=ANNOTATS,
+        tmp_dir=TMP_DIR,
+        blockSize=24, ##16 is good,
+        idxChunks=1, ## keep to 1,
+        logfile=ANNOTATS + "emapperLOG.txt",
+        emapper_hits=ANNOTATS + "annots.emapper.hits",
+        emapper_seed=ANNOTATS + "annots.emapper.seed_orthologs",
+        emapper_anno=ANNOTATS + "annots.emapper.annotations"
+    output:
+        ec=ANNOTATS + "{sample}_annots.ec.txt",
+        ko=ANNOTATS + "{sample}_annots.ko.txt",
+        gg=ANNOTATS + "{sample}_annots.KEGGmap.txt"
+    run:
+        try:
+            shell_command = """
+        time emapper.py -i {input} -o annots --output_dir {params.out_dir} --cpu {threads} \
+                --itype proteins --block_size {params.blockSize} --index_chunks {params.idxChunks} --data_dir {params.egg_db}  \
+                --override --temp_dir {params.tmp_dir}  --scratch_dir {params.tmp_dir} --dbmem >> {params.logfile} 2>&1 
+
+        if [[ ! -s {params.emapper_anno} ]]; then 
+            echo "---- FAIL: no gene annotations were produced for {wildcards.sample}" && exit 0
+        else 
+            echo "---- PASSED: gene annotations for {wildcards.sample} finished successfully" 
+        fi
+
+        ## grep needed terms
+        grep -E \"NODE_|TRINITY_\" {params.emapper_anno} | cut -f 1,11 | sed -e 's/\\t-//g' | grep -e $'\\t' | \
+                awk '{{n=split($2,s,\",\");for (i=1;i<=n;i++) {{$2=s[i];print}}}}' | sed -e 's/\\s/\\t/g' > {output.ec} || true
+
+        grep -E \"NODE_|TRINITY_\" {params.emapper_anno} | cut -f1,12 | grep \"ko:\" | sed 's/ko://g' | \
+                awk '{{n=split($2,s,\",\");for (i=1;i<=n;i++) {{$2=s[i];print}}}}' | sed -e 's/\\s/\\t/g' > {output.ko} || true
+
+        grep -E \"NODE_|TRINITY_\" {params.emapper_anno} | cut -f1,13 | grep \"ko\" | sed 's/,map.*//g' | sed 's/ko/map/g' | \
+                awk '{{n=split($2,s,\",\");for (i=1;i<=n;i++) {{$2=s[i];print}}}}' | sed -e 's/\\s/\\t/g' > {output.gg} || true
+        """
+            main_logger.info(f"Shell command for rule gene_annotation:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule gene_annotation: {e}\ninputs: {input}")
+            raise(e)
+
+
+rule gene_annot_seqExtract:
+    input: 
+        faa=rules.gene_prediction.output.faa,
+        fna=rules.gene_prediction.output.fna,
+        kos=rules.gene_annotation.output.ko,
+        ecs=rules.gene_annotation.output.ec
+    output:
+        kofaa=ANNOTATS + "{sample}_annots.ko.faa",
+        kofna=ANNOTATS + "{sample}_annots.ko.fna",
+        ecfaa=ANNOTATS + "{sample}_annots.ec.faa",
+        ecfna=ANNOTATS + "{sample}_annots.ec.fna"
+    run:
+        try:
+            shell_command = """
+        seqtk subseq {input.faa} {input.kos} > {output.kofaa}
+        seqtk subseq {input.fna} {input.kos} > {output.kofna}
+        seqtk subseq {input.faa} {input.ecs} > {output.ecfaa}
+        seqtk subseq {input.fna} {input.ecs} > {output.ecfna}
+        """
+            main_logger.info(f"Shell command for rule gene_annot_seqExtract:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule gene_annot_seqExtract: {e}\ninputs: {input}")
+            raise(e)
+    
+
+
+rule gene_annot_iTPMs:
+    input:
+        abufile=rules.tpm_normalization.output.ABUNtab, 
+        grp_kos=rules.gene_annotation.output.ko,
+        grp_ecs=rules.gene_annotation.output.ec
+    output:
+        abukos=ANNOTATS + "ANNOTgenes_ABUNtab.ko.txt",
+        abuecs=ANNOTATS + "ANNOTgenes_ABUNtab.ec.txt"
+    run:
+        try:
+            shell_command = """
+            awk -v OFS=\"\\t\" 'NR==FNR {{ id[$1]=$0; next }} ($1 in id){{ print $2, id[$1]}}'  {input.abufile} {input.grp_kos} | \
+                sed '1s/^/#KO\\tnodeID\\tlen\\treads\\tcov\\tiRPK\\tiTPM\\n/' > {output.abukos}
+            awk -v OFS=\"\\t\" 'NR==FNR {{ id[$1]=$0; next }} ($1 in id){{ print $2, id[$1]}}'  {input.abufile} {input.grp_ecs} | \
+                sed '1s/^/#KO\\tnodeID\\tlen\\treads\\tcov\\tiRPK\\tiTPM\\n/' > {output.abuecs}        
+        """
+            main_logger.info(f"Shell command for rule gene_annot_iTPMs:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule gene_annot_iTPMs: {e}\ninputs: {input}")
+            raise(e)
+
+rule gene_annot_geneTPMs:
+    input:
+        abukos=rules.gene_annot_iTPMs.output.abukos,
+        abuecs=rules.gene_annot_iTPMs.output.abuecs
+    params:
+        awk_geneTPM_script=config["awk_geneTPM_script"],
+        awk_joinTPM_script=config["awk_joinTPM_script"],
+        KO_list=config["KO_listfile"],
+        EC_list=config["EC_listfile"]
+    output:
+        tmpko=temp(ANNOTATS +     "_tmp_geneTPMtab.ko.txt"),
+        TPMko=     ANNOTATS + "{sample}_geneTPMtab.ko.txt",
+        tmpec=temp(ANNOTATS +     "_tmp_geneTPMtab.ec.txt"),
+        TPMec=     ANNOTATS + "{sample}_geneTPMtab.ec.txt"
+    run:
+        try:
+            shell_command = """
+        cut -f1,7 {input.abukos} | sed $'s/#KO.*//g' | awk -F'\\t' -f {params.awk_geneTPM_script} > {output.tmpko}
+        awk -F'\\t' -f {params.awk_joinTPM_script} {params.KO_list} {output.tmpko} | \
+        sed '1s/^/#KO\\tgeneTPM\\tgeneNAME\\n/'> {output.TPMko}
+
+        cut -f1,7 {input.abuecs} | sed $'s/#EC.*//g' | awk -F'\\t' -f {params.awk_geneTPM_script} > {output.tmpec}
+        awk -F'\\t' -f {params.awk_joinTPM_script} {params.EC_list} {output.tmpec} | \
+        sed '1s/^/#EC\\tgeneTPM\\tgeneNAME\\n/'> {output.TPMec}
+        """
+            main_logger.info(f"Shell command for rule gene_annot_geneTPMs:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule gene_annot_geneTPMs: {e}\ninputs: {input}")
+            raise(e)
+
+rule cp_geneTPM_files:
+    input: 
+        kos=rules.gene_annot_geneTPMs.output.TPMko,
+        ecs=rules.gene_annot_geneTPMs.output.TPMec,
+    params:
+        out_dir=GENEBIN
+    output:
+        GENEBIN + "{sample}_geneTPMtab." + ANNO_TYPE + ".txt",
+    run:
+        try:
+            if config["annotations_type"] == "ko":
+                shell_command = "cp {input.kos} {params.out_dir} || touch {output}"
+            else:
+                shell_commdn = "cp {input.ecs} {params.out_dir} || touch {output}"
+
+            main_logger.info(f"Shell command for rule cp_geneTPM_files:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule cp_geneTPM_files: {e}\ninputs: {input}")
+            raise(e)
+
+
+# Step 8 starts (pwy predictions)
+rule copy_annotation_file:
+    input:
+        ko=rules.gene_annotation.output.ko,
+        ec=rules.gene_annotation.output.ec,
+        ABUNtab=rules.tpm_normalization.output.ABUNtab
+    output:
+        tmp_ann=temp(PATHWAYS + "_tmp_annots.txt"),
+        tmp_TPM=temp(PATHWAYS + "_tmp_TPM.txt")
+    run:
+        try:
+            if config["annotations_type"] == "ko":
+                shell_command = "cp {input.ko} {output.tmp_ann} && cut -f 1,5 {input.ABUNtab} > {output.tmp_TPM}"
+            else:
+                shell_command = "cp {input.ec} {output.tmp_ann} && cut -f 1,5 {input.ABUNtab} > {output.tmp_TPM}"
+
+            main_logger.info(f"Shell command for rule copy_annotation_file:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule copy_annotation_file: {e}\ninputs: {input}")
+            raise(e)
+
+rule run_min_path:
+    input:
+        ancient(rules.copy_annotation_file.output.tmp_ann),
+    params:
+        minpath_script=config["minpath_script"],
+        annotations_map=config["annotations_map"],
+        minpath_log=PATHWAYS_PREFIX + ".minpath.log.txt",
+        mps_file=PATHWAYS_PREFIX + ".mps",
+        minpath_mpt=PATHWAYS_PREFIX + "_tmp_missing_pathways.txt" ## where is this outputting?
+    output:
+        tmp_report=temp(PATHWAYS + "_tmp_report.txt"),
+        details=PATHWAYS_PREFIX + ".details.txt"
+    run:
+        try:
+            shell_command = """
+        if [ -s {input} ]; then
+            python3 {params.minpath_script} -any {input} -map {params.annotations_map} -mps {params.mps_file} \
+                -report {output.tmp_report} -details {output.details} >> {params.minpath_log} || \
+                echo "---- FAIL: No pathways found based on the available annotations in {wildcards.sample}" | \
+                tee -a {params.minpath_log} {output.details} > /dev/null && \
+                touch {output.tmp_report} ## needs to be empty
+            # rm {params.minpath_mpt}
+        else
+            echo "---- FAIL: No annotations found to infer pathways for {wildcards.sample}" | \
+            tee -a {output.details} {params.minpath_log} && \
+            touch {output.tmp_report}
+        fi
+        """
+        ## tee -a appends the 3 files
+            main_logger.info(f"Shell command for rule run_min_path:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule run_min_path: {e}\ninputs: {input}")
+            raise(e)
+
+
+rule create_pathways_report:
+    input:
+        rules.run_min_path.output.tmp_report
+    output:
+        PATHWAYS_PREFIX + ".report.txt"
+    run:
+        try:
+            shell_command = """
+        if [ -s {input} ]; then
+            grep 'minpath\ 1' {input} > {output}
+        else
+            touch {output} ## needs to be empty
+        fi
+        """
+            main_logger.info(f"Shell command for rule create_pathways_report:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule create_pathways_report: {e}\ninputs: {input}")
+            raise(e)
+
+
+
+rule run_genes2krona:
+    input:
+        tmp_annots=rules.copy_annotation_file.output.tmp_ann,
+        tmp_TPM=rules.copy_annotation_file.output.tmp_TPM,
+        report=rules.create_pathways_report.output
+    params:
+        krona_script=config["genes2krona_script"],
+        annotations_map=config["annotations_map"],
+        annotations_hrr=config["annotations_hrr"],
+        pwybin=PWYBIN,
+    output:
+        tmp_4kr=   temp(PATHWAYS + "_tmp_4kr.txt"),
+        krona_out=      PATHWAYS + "{sample}_4krona.txt",
+        krona_out_clone=PWYBIN   + "{sample}_4krona.txt"
+    run:
+        try:
+            shell_command = """
+        if [ -s {input.tmp_annots} -a -s {input.tmp_TPM} -a -s {input.report} ]; then
+            python3 {params.krona_script} -i {input.tmp_annots}\
+                -m {params.annotations_map} -H {params.annotations_hrr} \
+                -n {wildcards.sample} -c {input.tmp_TPM}\
+                -l {input.report} -o {output.tmp_4kr} &&\
+            sed '1s/^/#/' {output.tmp_4kr} > {output.krona_out} &&\
+            cp {output.krona_out} {output.krona_out_clone}
+        else
+            echo "---- FAIL: No annotations or pathways found for {wildcards.sample}, so pwybin krona file will be empty" &&\
+            touch {output.tmp_4kr} {output.krona_out} && mkdir -p {params.pwybin} &&\
+            touch {output.krona_out_clone}
+        fi
+        """
+            main_logger.info(f"Shell command for rule run_genes2krona:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule run_genes2krona: {e}\ninputs: {input}")
+            raise(e)
+
+rule gene_ktImportText:
+    input:
+        ancient( expand(rules.run_genes2krona.output.krona_out_clone, sample=samples) ),
+    output:
+        PWYPLOTS
+    run:
+        try:
+            shell_command = "ktImportText {input} -o {output}"
+            main_logger.info(f"Shell command for rule gene_ktImportText:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule gene_ktImportText: {e}\ninputs: {input}")
+            raise(e)
+
+
+# Step 9 starts
+if len(samples) > 1:
+    rule TAX_collation:
+        input:
+            expand(rules.tax_kreport2krona_per_sample.output.binfile, sample=samples)
+        params:
+            bin_dir=TED_READS_TAX + "taxbin/",
+            gen_dir="NA",
+            sfx4rmv="_wTAXid_4krona.txt",
+            taxRscr=config["tax_table_merging_script"],
+            tmp_dir=config["tmp_dir"],
+            out_dir=TAX_MERGED_TABLES,
+            logR=TAX_MERGED_TABLES + "TAX_collationR.log.txt",
+        output:
+            out2=TAX_MERGED_TABLES + "merged_Counts+TAX.txt",
+            out4=TAX_MERGED_TABLES + "merged_Counts+Lineage.txt",
+        run:
+            try:
+                shell_command = """
+            Rscript {params.taxRscr} --binDIR {params.bin_dir} \
+                --sfxRMV {params.sfx4rmv} --outDIR {params.out_dir} > {params.logR} 2>&1 
+            """
+                main_logger.info(f"Shell command for rule TAX_collation:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule TAX_collation: {e}\ninputs: {input}")
+                raise(e)
+
+
+    rule PWY_collation:
+        input:
+            pwyfiles=expand(rules.run_genes2krona.output.krona_out_clone, sample=samples ) , 
+            gnefiles=expand(rules.cp_geneTPM_files.output, sample=samples ),
+            htmldone=rules.gene_ktImportText.output,
+        params:
+            pwy_dir=PWYBIN,
+            gen_dir=GENEBIN,
+            string="_4krona.txt|_geneTPM.*.txt", 
+            pwyR_script=config["pwy_table_merging_script"],
+            out_dir=PWY_MERGED_TABLES,
+            logR=PWY_MERGED_TABLES + "PWY_collationR.log.txt",
+        output:
+            out2=PWY_MERGED_TABLES + "merged_Counts+PWY.txt",
+            out4=PWY_MERGED_TABLES + "merged_Counts+allTiers.txt",
+            out7=PWY_MERGED_TABLES + "merged_geneTPMtable.txt",
+        run:
+            try:
+                shell_command = """
+            Rscript {params.pwyR_script} --outDIR {params.out_dir} --sfxRMV '{params.string}' \
+                    --pwyDIR {params.pwy_dir} --genDIR {params.gen_dir} > {params.logR} 2>&1 
+            """
+                main_logger.info(f"Shell command for rule PWY_collation:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule PWY_collation: {e}\ninputs: {input}")
+                raise(e)
+
+
+# step 10
+rule tax_biom_per_sample: 
+    input:
+        rules.tax_kreport2krona_per_sample.output.binfile
+    params:
+        tabtype="OTU table"
+    output:
+        txt=temp(TAXBIOM + "{sample}_4biom.txt"),
+        biom=TAXBIOM + "{sample}_json.biom"
+    run:
+        try:
+            shell_command = """sed 's/\\t/;/g' {input} | sed 's/;/\\t/1' | nl -n ln |sed '1s/^/\\t/' | sed '1s/1\\s\\+\\t#/\\t/' | \
+        sed 's/\\s\\+\\t/\\t/g' | sed '1s/LINEAGE/taxonomy/' | sed -e '1s/Level.*/taxonomy/' > {output.txt} && \
+        biom convert -i {output.txt} -o {output.biom} --to-json --table-type='{params.tabtype}' --process-obs-metadata taxonomy"""
+            main_logger.info(f"Shell command for rule tax_biom_per_sample:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule tax_biom_per_sample: {e}\ninputs: {input}")
+            raise(e)
+
+rule pwy_biom_per_sample:
+    input:
+        rules.run_genes2krona.output.krona_out_clone
+    params:
+        tabtype="Pathway table"
+    output:
+        txt=temp(PWYBIOM + "{sample}_4biom.txt"),
+        biom=PWYBIOM + "{sample}_json.biom"
+    run:
+        try:
+            shell_command = """
+        if [ -s {input} ]; then
+            sed 's/\\t/;/g' {input} | sed 's/;/\\t/1' | nl -n ln |sed '1s/^/\\t/' | sed '1s/1\\s\\+\\t#/\\t/' | \
+            sed 's/\\s\\+\\t/\\t/g' | sed '1s/LINEAGE/taxonomy/' | sed -e '1s/Level.*/taxonomy/' > {output.txt}
+            biom convert -i {output.txt} -o {output.biom} --to-json --table-type='{params.tabtype}' --process-obs-metadata taxonomy || touch {output.biom}
+        else
+            echo "The input file {input} is empty, so pwy_biom_per_sample will not run. All output file(s) from this step are empty."
+            touch {output.txt} {output.biom}
+        fi
+        """
+            main_logger.info(f"Shell command for rule pwy_biom_per_sample:\n{format(shell_command)}")
+            shell_command = cmd_with_error_report(shell_command)
+            shell(shell_command)
+        except Exception as e:
+            rules_error_logger.error(f"Error in rule pwy_biom_per_sample: {e}\ninputs: {input}")
+            raise(e)
+
+if len(samples) > 1:
+    rule TAX_collation_biom:
+        input:
+            tax_collation=rules.TAX_collation.output.out4,
+            mapping_file=config["map_file"]
+        params:
+            tabtype="OTU table"
+        output:
+            biom=TAX_MERGED_TABLES + "merged_Counts+Lineage_json.biom",
+            tmp=temp(TAX_MERGED_TABLES + "_tmpbiom.txt")
+        run:
+            try:
+                shell_command = """sed '1s/Lineage/taxonomy/' {input.tax_collation} > {output.tmp} && \
+            biom convert -i {output.tmp} -m <(sed '1s/^/#/' {input.mapping_file}) -o {output.biom} --to-json \
+             --table-type='{params.tabtype}' --process-obs-metadata taxonomy"""
+                main_logger.info(f"Shell command for rule TAX_collation_biom:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule TAX_collation_biom: {e}\ninputs: {input}")
+                raise(e)
+    
+    rule PWY_collation_biom:
+        input:
+            pwy_collation=rules.PWY_collation.output.out4,
+            mapping_file=config["map_file"]
+        params:
+            tabtype="Pathway table"
+        output:
+            biom=PWY_MERGED_TABLES + "merged_Counts+allTiers_json.biom",
+            tmp=temp(PWY_MERGED_TABLES + "_tmpbiom.txt")
+        run:
+            try:
+                shell_command = """sed '1s/allTiers/taxonomy/' {input.pwy_collation} > {output.tmp} && \
+            biom convert -i {output.tmp} -m <(sed '1s/^/#/' {input.mapping_file}) -o {output.biom} --to-json \
+             --table-type='{params.tabtype}' --process-obs-metadata taxonomy"""
+                main_logger.info(f"Shell command for rule PWY_collation_biom:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule PWY_collation_biom: {e}\ninputs: {input}")
+                raise(e)
+
+
+# Step 11 starts
+# Ignore if fail: "because those are statistics and whether they fail or not depend on the actual dataset, not on the performance of the pipeline"
+if len(samples) > 1:
+    rule TAX_diversity_plots:
+        input:
+            in1=rules.TAX_collation.output.out2,
+            mapping_file=config["map_file"]
+        params:
+            merged_tables_dir=TAX_MERGED_TABLES,
+            tax_diversity_plots_script=config["tax_diversity_plots_script"],
+            tmp_dir=TMP_DIR,
+            out_dir=TAX_DIVERSITY_PLOTS,
+            tmp_mapping_file=TAX_DIVERSITY_PLOTS + "_tmp_mapping_file.txt", ## if output temp() takes forever to remove
+        output:
+            logR=TAX_DIVERSITY_PLOTS + "TAX_diversity_plotsR.log.txt",
+        run:
+            try:
+                shell_command = """
+            sed '1s/^#//' {input.mapping_file} > {params.tmp_mapping_file}
+            Rscript {params.tax_diversity_plots_script} --wdir {params.tmp_dir} --indir {params.merged_tables_dir} \
+                --mfile {params.tmp_mapping_file} --outdir {params.out_dir} >{output.logR} 2>&1 || \
+             echo "Failed to generate TAX_diversity_plots" >> {output.logR} 2>&1 
+            touch {output.logR} && rm {params.tmp_mapping_file}
+            """
+                main_logger.info(f"Shell command for rule TAX_diversity_plots:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule TAX_diversity_plots: {e}\ninputs: {input}")
+                raise(e)
+  
+    rule PWY_diversity_plots:
+        input:
+            in1=rules.PWY_collation.output.out2,
+            mapping_file=config["map_file"]
+        params:
+            merged_tables_dir=PWY_MERGED_TABLES,
+            pwy_diversity_plots_script=config["pwy_diversity_plots_script"],
+            tmp_dir=TMP_DIR,
+            out_dir=PWY_DIVERSITY_PLOTS,
+            tmp_mapping_file=PWY_DIVERSITY_PLOTS + "_tmp_mapping_file.txt", ## if output temp() takes forever to remove
+        output:
+            logR=PWY_DIVERSITY_PLOTS + "PWY_diversity_plotsR.log.txt"
+        run:
+            try:
+                shell_command = """
+            sed 's/^#//g' {input.mapping_file} > {params.tmp_mapping_file}
+            Rscript {params.pwy_diversity_plots_script} --wdir {params.tmp_dir} --indir {params.merged_tables_dir} \
+                    --mfile {params.tmp_mapping_file} --outdir {params.out_dir} >{output.logR}  2>&1 || \
+                    echo "Failed to generate PWY_diversity_plots" >>{output.logR}  2>&1 
+            touch {output.logR} && rm {params.tmp_mapping_file}
+            """
+                main_logger.info(f"Shell command for rule PWY_diversity_plots:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule PWY_diversity_plots: {e}\ninputs: {input}")
+                raise(e)
+
+### ----------- main done ----------------
+### ----------- elective steps -----------
+
+# Step 6A starts
+if config["tax_genes"]:
+    rule tax_classification_genes:
+        resources:
+            mem_gb=config["total_mem_gb"]
+        input:
+            fna=rules.gene_prediction.output.fna
+        threads: threads_per_job
+        params:
+            classification_db=config["classification_db"],
+            confidence_taxon=config["kr2confidence_taxonomic"],
+        output:
+            klog=temp(GENETAX_PREFIX + "_klog.txt"), ## needed for genes
+            report=GENETAX_PREFIX + "_taxREPORT.txt",
+            outlog=GENETAX_PREFIX + "_classLOG.txt"
+            # classified_out=GENETAX_PREFIX + "_classified.fna",
+            # unclassified_out=GENETAX_PREFIX + "_unclassified.fna"
+        run:
+            try:
+                shell_command = """kraken2 --use-names --threads {threads}  --db {params.classification_db} \
+            --confidence {params.confidence_taxon} {input.fna} --memory-mapping \
+            --output {output.klog} \
+            --report {output.report} 2>> {output.outlog}"""
+            # "--classified-out {output.classified_out} "
+            # "--unclassified-out {output.unclassified_out}"
+                main_logger.info(f"Shell command for rule tax_classification_genes:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule tax_classification_genes: {e}\ninputs: {input}")
+                raise(e)
+
+    rule tax_genes_ABUNtabtax:
+        input:
+            klog=rules.tax_classification_genes.output.klog,
+            ABUNtab=rules.tpm_normalization.output.ABUNtab
+        output:
+            tmptax=temp(GENETAX_PREFIX + "_tmptax.txt"),
+            ABUNtax=GENETAX_PREFIX + "_ABUNtab_wTAX.txt"
+        run:
+            try:
+                shell_command = """cut -f2-3 {input.klog} | sed -e 's/ (taxid /\\t/g' | sed -e 's/)$//g' | sort | \
+            sed '1s/^/#contigName\\tTAXname\\tTAXid\\n/' > {output.tmptax} && \
+            paste {input.ABUNtab} <(cut -f2-3 {output.tmptax}) > {output.ABUNtax} """
+                main_logger.info(f"Shell command for rule tax_genes_ABUNtabtax:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule tax_genes_ABUNtabtax: {e}\ninputs: {input}")
+                raise(e)
+
+    # if DBNAME == "mgbcDB":
+    #     rule omit_krona:
+    #         output:
+    #             done=temp(GENETAX_PREFIX + "_omittingKrona.done")
+    #         shell:
+    #             """
+    #             print("---> krona plots omitted for selected classification DB")
+    #             touch {output.done}
+    #             """
+    # else:
+    rule tax_genes_4krona:
+        input:
+            ABUNtax=rules.tax_genes_ABUNtabtax.output.ABUNtax
+        output:
+            out_4krona=GENETAX + "bin/{sample}_4krona.txt"
+        run:
+            try:
+                shell_command = """cut -f6-8 {input.ABUNtax} | awk -F'\\t' 'NR>1{{k = $3; sum[k]+= $1; name[k]=$2}} END {{ print; for (k in sum) print sum[k], name[k], k}}' OFS=\"\t\" | \
+            sed -e '1 s/^/#iTPM\\tTAXname\\tTAXid\\n/' > {output.out_4krona}"""
+                main_logger.info(f"Shell command for rule tax_genes_4krona:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule tax_genes_4krona: {e}\ninputs: {input}")
+                raise(e)
+
+    rule kt_genetax_html:
+        input:
+            expand(rules.tax_genes_4krona.output.out_4krona, sample=samples)
+        params:
+            krona_tax_db=config["krona_tax_db"]
+        output:
+            GENETAX + "TAXplots_genesTAX_" + DBNAME + ".html"
+        run:
+            try:
+                shell_command = "ktImportTaxonomy {input} -m 1 -q 2 -t 3 -d 10 -tax {params.krona_tax_db} -o {output}"
+                main_logger.info(f"Shell command for rule kt_genetax_html:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule kt_genetax_html: {e}\ninputs: {input}")
+                raise(e)
+
+
+# Step 6B starts
+if config["tax_scaffolds"]:
+    rule tax_classification_scaffolds:
+        resources:
+            mem_gb=config["total_mem_gb"]
+        input:
+            finfas=rules.run_bbtools_stats.output.finfasta,
+            require=expand(rules.scaffold_and_read_counts.output.out_scfCovr, sample=samples), ##processing organization
+        threads: threads_per_job
+        params:
+            classification_db=config["classification_db"],
+            confidence_taxon=config["kr2confidence_taxonomic"],
+        output:
+            klog=temp(SCAFTAX_DIR + "_klog.txt"),
+            report=SCAFTAX_PREFIX + "_taxREPORT.txt",
+            outlog=SCAFTAX_PREFIX + "_classLOG.txt"
+        run:
+            try:
+                shell_command = """kraken2 --use-names --db {params.classification_db} --confidence {params.confidence_taxon} --memory-mapping \
+            --threads {threads} {input.finfas} --output {output.klog} --report {output.report} 2>> {output.outlog}"""
+                main_logger.info(f"Shell command for rule tax_classification_scaffolds:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule tax_classification_scaffolds: {e}\ninputs: {input}")
+                raise(e)
+
+    rule generate_scaftax:
+        input:
+            klog=rules.tax_classification_scaffolds.output.klog,
+            scov=rules.scaffold_and_read_counts.output.out_scfCovr
+        output:
+            scovtax=SCAFTAX_PREFIX + "_asmbCovr_wTAX.txt",
+            tmp=temp(SCAFTAX_DIR   + "_tmp_tax.txt")
+        run:
+            try:
+                shell_command = """cut -f2-3 {input.klog} | sed -e 's/ (taxid /\\t/g' | sed -e 's/)$//g' | sort | \
+            sed '1s/^/#contigName\\tTAXname\\tTAXid\\n/' > {output.tmp} && \
+            paste {input.scov} <(cut -f2-3 {output.tmp}) > {output.scovtax}"""
+                main_logger.info(f"Shell command for rule generate_scaftax:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule generate_scaftax: {e}\ninputs: {input}")
+                raise(e)
+
+
+    rule tax_scafs_4krona:
+        input:
+            scovtax=rules.generate_scaftax.output.scovtax
+        output:
+            out_4krona=SCAFTAX + "bin/{sample}_4krona.txt"
+        run:
+            try:
+                shell_command = """cut -f12,13,14 {input.scovtax} | \
+            awk -F'\\t' 'NR>1{{k = $3; sum[k]+= $1; name[k]=$2}} END {{ print; for (k in sum) print sum[k], name[k], k}}' OFS=\"\t\" | \
+            sed -e '1 s/^/#RPK\\tTAXname\\tTAXid\\n/' > {output.out_4krona}"""
+                main_logger.info(f"Shell command for rule tax_scafs_4krona:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule tax_scafs_4krona: {e}\ninputs: {input}")
+                raise(e)
+
+    rule kt_scaftax_html:
+        input:
+            expand(rules.tax_scafs_4krona.output.out_4krona, sample=samples)
+        params:
+            krona_tax_db=config["krona_tax_db"]
+        output:
+            SCAFTAX + "TAXplots_scaffTAX_" + DBNAME + ".html" ## approximate bundnaces
+        run:
+            try:
+                shell_command = "ktImportTaxonomy {input} -m 1 -q 2 -t 3 -d 10 -tax {params.krona_tax_db} -o {output}"
+                main_logger.info(f"Shell command for rule kt_scaftax_html:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule kt_scaftax_html: {e}\ninputs: {input}")
+                raise(e)
+
+
+# Step 6C starts
+if config["mag"]:
+    rule metabat2_run:
+        input:
+            fasta=rules.run_bbtools_stats.output.finfasta,
+            depths=rules.scaffold_and_read_counts.output.out_depths
+        threads: threads_per_job
+        params:
+            basename=MAG + "mag"
+        output:
+            temp(MAG + "_metabat2_run.done")
+        run:
+            try:
+                shell_command = """metabat2 -i {input.fasta} -o {params.basename} -m 1500 --maxEdges 250 \
+            --unbinned  -t {threads} -a {input.depths} && touch {output}"""
+                main_logger.info(f"Shell command for rule metabat2_run:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule metabat2_run: {e}\ninputs: {input}")
+                raise(e)
+
+    rule checkm_lineage_wf:
+        resources:
+            mem_gb=config["total_mem_gb"],
+        threads: config["num_cpus"]
+        input:
+            # We do not use the actual output here but need files from metabat2_run step
+            rules.metabat2_run.output
+        params:
+            ftype="fa",
+            basename=MAG,
+            out=MAG_QA
+        output:
+            MAG_QA + "lineage.ms"
+        log:
+            MAG_QA + "checkmLOG.txt"
+        conda:
+            "checkm"
+        script:
+            "scripts/checkm_lineage_wf.py"
+
+    rule checkm_qa:
+        input:
+            rules.checkm_lineage_wf.output
+        params:
+            mag_qa=MAG_QA
+        threads: config["num_cpus"]
+        output:
+            qa_txt=MAG_QA + "mag_qa.txt",
+            tax=MAG_QA + "mag_tax.txt"
+        conda:
+            "checkm"
+        script:
+            "scripts/checkm_qa.py"
+
+    # Too much crap logs, using 2>/dev/null
+    rule checkm_coverage:
+        input:
+            bam=rules.sam_to_bam.output.final_bam,
+            require=rules.metabat2_run.output, # required files
+            require2=rules.checkm_lineage_wf.output # requlred file
+        params:
+            ftype="fa",
+            mag=MAG
+        threads: config["num_cpus"]
+        output:
+            MAG_QA + "mag_coverage.txt"
+        conda:
+            "checkm"
+        script:
+            "scripts/checkm_coverage.py"
+
+    rule checkm_profile:
+        input:
+            rules.checkm_coverage.output
+        output:
+            MAG_QA + "mag_profiles.txt"
+        conda:
+            "checkm"
+        script:
+            "scripts/checkm_profile.py"
+
+    rule join_profiles_tax:
+        input:
+            tax=rules.checkm_qa.output.tax,
+            qa_txt=rules.checkm_qa.output.qa_txt,
+            profiles=rules.checkm_profile.output
+        params:
+            sedSTR=r"'s/[^\t]*_assembly: //g'"
+        output:
+            tmp1=temp(MAG_QA + "tmp1.txt"),
+            tmp2=temp(MAG_QA + "tmp2.txt"),
+            tmpsum=temp(MAG_QA + "mag_tmpsum.txt"),
+            summary=MAG_QA + "mag_SUMMARY.txt"
+        run:
+            try:
+                shell_command = """cut {input.tax} -f1,5 > {output.tmp1} && \
+            cut {input.qa_txt} -f1,6-11,13,15,17,19,23 > {output.tmp2} && \
+            paste {output.tmp1} {output.tmp2} > {output.tmpsum} && \
+            join {input.profiles} {output.tmpsum} -t $'\\t' | cut -f 1,3,4,6,7-19 | sed {params.sedSTR} > {output.summary}"""
+                main_logger.info(f"Shell command for rule join_profiles_tax:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule join_profiles_tax: {e}\ninputs: {input}")
+                raise(e)
+
+    rule checkm_plots:
+        input:
+            in1=rules.metabat2_run.output, # need for MAG
+            in2=rules.checkm_lineage_wf.output # need for MAG_QA
+        params:
+            ftype="fa",
+            mag=MAG,
+            mag_qa=MAG_QA,
+            out=QC_PLOTS
+        output:
+            # Something to signal this rule is completed
+            QC_PLOTS + "_checkm_plots.done"
+        conda:
+            "checkm"
+        script:
+            "scripts/checkm_plots.py"
+
+    rule taxbin_krona_txt:
+        input:
+            profiles=rules.checkm_profile.output,
+            tax=rules.checkm_qa.output.tax
+        output:
+            TAXBIN + "bin/{sample}_4krona.txt"
+        run:
+            try:
+                shell_command = "join {input.profiles} {input.tax} -t $'\\t' | cut -f6,10,11 | sed -e 's/..__/\\t/g' | sed -e 's/\\tunresolved//g' | sed -e '1 s/^/#/' > {output}"
+                main_logger.info(f"Shell command for rule taxbin_krona_txt:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule taxbin_krona_txt: {e}\ninputs: {input}")
+                raise(e)
+
+    rule taxbin_krona_html:
+        input:
+            expand(rules.taxbin_krona_txt.output, sample=samples)
+        output:
+            TAXBIN + "TAXplots_MAGs.html"
+        run:
+            try:
+                shell_command = "ktImportText {input} -o {output}"
+                main_logger.info(f"Shell command for rule taxbin_krona_html:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule taxbin_krona_html: {e}\ninputs: {input}")
+                raise(e)
+
+    rule make_biom:
+        input:
+            profiles=expand(rules.checkm_profile.output, sample=samples),
+            tax=expand(rules.checkm_qa.output.tax, sample=samples)
+        params:
+            map_file=config["map_file"],
+            TAXCOL = "Taxonomy (contained)",
+            PROFCOL = lambda wildcards: "{sample}_asmbFinal: mapped reads",
+        output:
+            BIOM_FILE_6C
+        message: """rule {rule}
+        Making biom file from '{params.TAXCOL}' column in output of checkm tree_qa,
+        '{params.PROFCOL}' column in checkm profiles, and metadata.
+        metadata: {params.map_file}
+        input: {input}
+        output: {output}
+        jobid: {jobid}"""
+        run:
+            try:
+                make_biom_file(str(rules.checkm_profile.output),
+                           str(rules.checkm_qa.output.tax),
+                           samples.keys(),
+                           params.map_file,
+                           str(output), params.TAXCOL, str(params.PROFCOL))
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule make_biom: {e}\ninputs: {input}")
+                raise(e)
+
+# Step 6D
+# if config["find_args"]:
+#     rule amrfinder:
+#         input:
+#             rules.gene_prediction.output.faa
+#         threads: threads_per_job
+#         params:
+#             db_dir=config["amrfinder_db"]
+#         output:
+#             out1=GENES + "AMRs/AMRs.faa",
+#             out2=GENES + "AMRs/AMRs_info.txt",
+#         run:
+#             print("Running AMRFinder")
+#             shell("amrfinder -d {params.db_dir} --plus --protein {input} --threads {threads} --protein_output {output.out1} -o {output.out2}")
+
+if config["find_args"]:
+    rule run_RGI: ## this could be made to somehow use tmp_dir, but pain
+        input:
+            rules.gene_prediction.output.faa,
+        threads: threads_per_job    
+        params:
+            outDIR  = RGI_DIR,  
+            ftype   ='protein',
+            inFAA   ="_tmpPREDgenes.faa",
+            inFAAm  ="_tmpPREDgenes_noStar.faa",   ## removed "*" or begnign fake "ERROR" message can confuse
+            prefix  ="_tmpRGIraw", 
+            hmphdrs ="_tmpHeaders.txt",
+            carddb  =config["args_db_path"],
+            colsAA  ="1,9,11,15,16,17,28",
+            sedhdr  ='s/ # .*;gc_cont=0....//g',
+            rgi_raw ="RGI_raw.txt", ## used in rule
+            rgi_main="{sample}_RGI_main.txt",## used in rule
+            rgi_faas="{sample}_RGI_seqs.faa",## used in rule
+            rgi_log ="RGIrun_LOG.txt"
+        conda: 
+            "rgi"
+        output: ## output vars not used in rule but produced thorugh corresponding paramsVars
+            rgi_raw =RGI_DIR + "RGI_raw.txt", 
+            rgi_main=RGI_DIR + "{sample}_RGI_main.txt",
+            rgi_faas=RGI_DIR + "{sample}_RGI_seqs.faa",
+        script:
+            "scripts/run_RGI.py"
+
+    rule merge_ARGtabs:
+        threads: threads_per_job
+        input:
+            args=expand(rules.run_RGI.output.rgi_main, sample=samples),
+            require=expand(rules.tpm_normalization.output.ABUNtab, sample=samples), #requires completion
+        params:
+            argMRGscript=config["argSCR_rgi"],
+            asmb_all=lambda wildcards: ASMB_MTX if config["denovo_mtx"] else ASMB_MGX 
+        output:
+            out=PWY_MERGED_TABLES + "merged_argsTPMtable.txt"
+        run:
+            try:
+                shell_command = "python3 {params.argMRGscript} {params.asmb_all}"
+                main_logger.info(f"Shell command for rule merge_ARGtabs:\n{format(shell_command)}")
+                shell_command = cmd_with_error_report(shell_command)
+                shell(shell_command)
+            except Exception as e:
+                rules_error_logger.error(f"Error in rule merge_ARGtabs: {e}\ninputs: {input}")
+                raise(e)
+
+
+# #--------------- electives done ----------
+ 
+import subprocess
+onsuccess:
+    shell(clean_output() + handle_TED() + handle_cp_biom() + main_outputs() ) 
+    subprocess.run(fwd_outputs(), shell = True ) ## for DiscoVIR and MAGs pipeline
+    #shell("cp {log_path} {outputs_dir}/.snakemake.log")
+onerror:
+    shell(clean_output() + handle_TED() + handle_cp_biom() + main_outputs() )
+    subprocess.run(fwd_outputs(), shell = True ) ## for DiscoVIR and MAGs pipeline
+    #shell("cp {log_path} {outputs_dir}/.snakemake.log")

@@ -1,0 +1,33 @@
+# Dockerfile to create new image in case there is update to repo code only
+FROM public.ecr.aws/niaid_nephele/pipeline/nephele_wgsa2_base:93947ad
+
+ARG MGMT_ACCT_ID
+
+# Install nephele_pipeline_utils
+RUN --mount=type=secret,id=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=AWS_SECRET_ACCESS_KEY \
+    --mount=type=secret,id=AWS_SESSION_TOKEN \
+    AWS_ACCESS_KEY_ID=$(cat /run/secrets/AWS_ACCESS_KEY_ID) \
+    AWS_SECRET_ACCESS_KEY=$(cat /run/secrets/AWS_SECRET_ACCESS_KEY) \
+    AWS_SESSION_TOKEN=$(cat /run/secrets/AWS_SESSION_TOKEN) \
+    aws codeartifact login --tool pip --repository nephele_workspace --domain pypi --domain-owner ${MGMT_ACCT_ID} --region us-east-1 && \
+    pip install nephele-pipeline-utils==0.1.95 && \
+    pip config unset global.index-url
+
+# Set the working directory for the pipeline
+WORKDIR /pipeline
+
+# Create nephele group and user
+RUN addgroup --system nephele && adduser --system --ingroup nephele nephele
+
+# Copy the entrypoint script into the container
+COPY --chown=nephele:nephele entrypoint.sh /usr/local/bin/
+
+# Make the entrypoint script executable
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Copy source code to Workdir
+COPY --chown=nephele:nephele nephele_wgsa2 .
+RUN chmod -R u+rw /pipeline
+
+ENTRYPOINT ["entrypoint.sh"]

@@ -1,0 +1,1 @@
+BEGIN { OFS="\t" }NR>1{ sum[$1] += $2; count[$1] += 1 }END {for (i in sum) print i, sum[i] }
